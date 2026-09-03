@@ -13,10 +13,10 @@ use std::sync::{self, Arc, RwLock};
 
 pub use crate::graphics::Text;
 
-const COLOR_MODE: cryoglyph::ColorMode = if color::GAMMA_CORRECTION {
-    cryoglyph::ColorMode::Accurate
+const COLOR_MODE: sluggrs::ColorMode = if color::GAMMA_CORRECTION {
+    sluggrs::ColorMode::Accurate
 } else {
-    cryoglyph::ColorMode::Web
+    sluggrs::ColorMode::Web
 };
 
 pub type Batch = Vec<Item>;
@@ -71,7 +71,7 @@ impl Cache {
 }
 
 struct Upload {
-    renderer: cryoglyph::TextRenderer,
+    renderer: sluggrs::TextRenderer,
     buffer_cache: BufferCache,
     transformation: Transformation,
     version: usize,
@@ -87,14 +87,14 @@ pub struct Storage {
 }
 
 struct Group {
-    atlas: cryoglyph::TextAtlas,
+    atlas: sluggrs::TextAtlas,
     version: usize,
     should_trim: bool,
     handle: Arc<()>, // Keeps track of active uploads
 }
 
 impl Storage {
-    fn get(&self, cache: &Cache) -> Option<(&cryoglyph::TextAtlas, &Upload)> {
+    fn get(&self, cache: &Cache) -> Option<(&sluggrs::TextAtlas, &Upload)> {
         if cache.text.is_empty() {
             return None;
         }
@@ -109,10 +109,10 @@ impl Storage {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        viewport: &cryoglyph::Viewport,
+        viewport: &sluggrs::Viewport,
         encoder: &mut wgpu::CommandEncoder,
         format: wgpu::TextureFormat,
-        state: &cryoglyph::Cache,
+        state: &sluggrs::Cache,
         cache: &Cache,
         new_transformation: Transformation,
         bounds: Rectangle,
@@ -127,7 +127,7 @@ impl Storage {
             );
 
             Group {
-                atlas: cryoglyph::TextAtlas::with_color_mode(
+                atlas: sluggrs::TextAtlas::with_color_mode(
                     device, queue, state, format, COLOR_MODE,
                 ),
                 version: 0,
@@ -171,7 +171,7 @@ impl Storage {
                 }
             }
             hash_map::Entry::Vacant(entry) => {
-                let mut renderer = cryoglyph::TextRenderer::new(
+                let mut renderer = sluggrs::TextRenderer::new(
                     &mut group.atlas,
                     device,
                     wgpu::MultisampleState::default(),
@@ -253,13 +253,13 @@ impl Storage {
     }
 }
 
-pub struct Viewport(cryoglyph::Viewport);
+pub struct Viewport(sluggrs::Viewport);
 
 impl Viewport {
     pub fn update(&mut self, queue: &wgpu::Queue, resolution: Size<u32>) {
         self.0.update(
             queue,
-            cryoglyph::Resolution {
+            sluggrs::Resolution {
                 width: resolution.width,
                 height: resolution.height,
             },
@@ -270,15 +270,15 @@ impl Viewport {
 #[derive(Clone)]
 pub struct Pipeline {
     format: wgpu::TextureFormat,
-    cache: cryoglyph::Cache,
-    atlas: Arc<RwLock<cryoglyph::TextAtlas>>,
+    cache: sluggrs::Cache,
+    atlas: Arc<RwLock<sluggrs::TextAtlas>>,
 }
 
 impl Pipeline {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
-        let cache = cryoglyph::Cache::new(device);
+        let cache = sluggrs::Cache::new(device);
         let atlas =
-            cryoglyph::TextAtlas::with_color_mode(device, queue, &cache, format, COLOR_MODE);
+            sluggrs::TextAtlas::with_color_mode(device, queue, &cache, format, COLOR_MODE);
 
         Pipeline {
             format,
@@ -287,8 +287,12 @@ impl Pipeline {
         }
     }
 
+    pub fn atlas(&self) -> &Arc<RwLock<sluggrs::TextAtlas>> {
+        &self.atlas
+    }
+
     pub fn create_viewport(&self, device: &wgpu::Device) -> Viewport {
-        Viewport(cryoglyph::Viewport::new(device, &self.cache))
+        Viewport(sluggrs::Viewport::new(device, &self.cache))
     }
 
     pub fn trim(&self) {
@@ -296,9 +300,8 @@ impl Pipeline {
     }
 }
 
-#[derive(Default)]
 pub struct State {
-    renderers: Vec<cryoglyph::TextRenderer>,
+    renderers: Vec<sluggrs::TextRenderer>,
     prepare_layer: usize,
     cache: BufferCache,
     storage: Storage,
@@ -306,7 +309,12 @@ pub struct State {
 
 impl State {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            renderers: Vec::new(),
+            prepare_layer: 0,
+            cache: BufferCache::default(),
+            storage: Storage::default(),
+        }
     }
 
     pub fn prepare(
@@ -329,7 +337,7 @@ impl State {
                     text,
                 } => {
                     if self.renderers.len() <= self.prepare_layer {
-                        self.renderers.push(cryoglyph::TextRenderer::new(
+                        self.renderers.push(sluggrs::TextRenderer::new(
                             &mut atlas,
                             device,
                             wgpu::MultisampleState::default(),
@@ -355,7 +363,7 @@ impl State {
                         Ok(()) => {
                             self.prepare_layer += 1;
                         }
-                        Err(cryoglyph::PrepareError::AtlasFull) => {
+                        Err(sluggrs::PrepareError::AtlasFull) => {
                             // If the atlas cannot grow, then all bets are off.
                             // Instead of panicking, we will just pray that the result
                             // will be somewhat readable...
@@ -384,14 +392,13 @@ impl State {
 
     pub fn render<'a>(
         &'a self,
-        pipeline: &'a Pipeline,
+        atlas: &'a sluggrs::TextAtlas,
         viewport: &'a Viewport,
         start: usize,
         batch: &'a Batch,
         bounds: Rectangle<u32>,
         render_pass: &mut wgpu::RenderPass<'a>,
     ) -> usize {
-        let atlas = pipeline.atlas.read().expect("Read text atlas");
         let mut layer_count = 0;
 
         render_pass.set_scissor_rect(bounds.x, bounds.y, bounds.width, bounds.height);
@@ -402,16 +409,16 @@ impl State {
                     let renderer = &self.renderers[start + layer_count];
 
                     renderer
-                        .render(&atlas, &viewport.0, render_pass)
+                        .render(atlas, &viewport.0, render_pass)
                         .expect("Render text");
 
                     layer_count += 1;
                 }
                 Item::Cached { cache, .. } => {
-                    if let Some((atlas, upload)) = self.storage.get(cache) {
+                    if let Some((cached_atlas, upload)) = self.storage.get(cache) {
                         upload
                             .renderer
-                            .render(atlas, &viewport.0, render_pass)
+                            .render(cached_atlas, &viewport.0, render_pass)
                             .expect("Render cached text");
                     }
                 }
@@ -432,15 +439,15 @@ impl State {
 fn prepare(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    viewport: &cryoglyph::Viewport,
+    viewport: &sluggrs::Viewport,
     encoder: &mut wgpu::CommandEncoder,
-    renderer: &mut cryoglyph::TextRenderer,
-    atlas: &mut cryoglyph::TextAtlas,
+    renderer: &mut sluggrs::TextRenderer,
+    atlas: &mut sluggrs::TextAtlas,
     buffer_cache: &mut BufferCache,
     sections: &[Text],
     layer_bounds: Rectangle,
     layer_transformation: Transformation,
-) -> Result<(), cryoglyph::PrepareError> {
+) -> Result<(), sluggrs::PrepareError> {
     let mut font_system = font_system().write().expect("Write font system");
     let font_system = font_system.raw();
 
@@ -448,7 +455,7 @@ fn prepare(
         Paragraph(Paragraph),
         Editor(Editor),
         Cache(text_cache::KeyHash),
-        Raw(Arc<cryoglyph::Buffer>),
+        Raw(Arc<sluggrs::Buffer>),
     }
 
     let allocations: Vec<_> = sections
@@ -623,12 +630,12 @@ fn prepare(
                 scale /= hint_factor;
             }
 
-            Some(cryoglyph::TextArea {
-                text: buffer.layout_runs(),
+            Some(sluggrs::TextArea {
+                buffer,
                 left: position.x,
                 top: position.y,
                 scale,
-                bounds: cryoglyph::TextBounds {
+                bounds: sluggrs::TextBounds {
                     left: clip_bounds.x.round() as i32,
                     top: clip_bounds.y.round() as i32,
                     right: (clip_bounds.x + clip_bounds.width).round() as i32,
@@ -638,6 +645,8 @@ fn prepare(
             })
         });
 
+    let mut swash_cache = sluggrs::SwashCache::new();
+
     renderer.prepare(
         device,
         queue,
@@ -646,6 +655,8 @@ fn prepare(
         atlas,
         viewport,
         text_areas,
-        &mut cryoglyph::SwashCache::new(),
-    )
+        &mut swash_cache,
+    )?;
+
+    Ok(())
 }
